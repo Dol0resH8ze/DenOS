@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Firefox
+Exec=firefox-esr
+Icon=firefox-esr
+Terminal=false
+StartupNotify=true

@@ -1,0 +1,67 @@
+DENOS FOR WINDOWS / VIRTUALBOX LAUNCHER
+
+1. Keep Start-DenOS.cmd, Start-DenOS.ps1 and DenOS-0.1-amd64.iso together.
+2. Install Oracle VirtualBox 7.1 or newer if it is not already installed.
+3. Double-click Start-DenOS.cmd. Administrator access is not required.
+
+The launcher creates a VM called "DenOS 0.1" inside the adjacent DenOS-VM
+folder, registers it with VirtualBox, and opens its window. Allow 4 GB of
+free RAM for the guest; a host with 8 GB or more is recommended. Hardware
+virtualization must be enabled in your PC firmware.
+
+The VM uses 2 CPUs, 128 MB video memory, VMSVGA graphics and EFI firmware.
+Clipboard sharing, drag-and-drop, shared folders, USB passthrough, port
+forwarding, remote display and microphone input are disabled. The only
+media supplied are this ISO and, if you choose it, a dedicated virtual disk.
+The launcher never attaches a physical host disk or a host folder.
+
+NAT networking is available to the guest. DenOS starts each fresh boot
+offline; enable network access deliberately in its Privacy Center. A VM
+and NAT do not provide anonymity or protection from the host administrator.
+
+LIVE SESSION
+Double-click Start-DenOS.cmd to boot the ISO immediately. The default creates
+no virtual hard disk and asks no setup questions. The launcher can be run again
+after shutting down DenOS. Right Ctrl releases the mouse and keyboard from the
+VM window.
+
+OPTIONAL INSTALLER TEST
+To explicitly create a sparse 24 GB virtual installation disk, run this command
+from the folder containing these files:
+
+    .\Start-DenOS.cmd -WithDisk
+
+The VDI grows as it is used, up to 24 GB, so it does not immediately consume
+24 GB of host space. Inside DenOS, open Install DenOS. The sole virtual hard
+disk is the 24 GB disk; the installer erases that VIRTUAL disk after its own
+confirmation. Your host drives are not attached to this VM.
+
+After installation, shut down DenOS fully. Boot the installed virtual disk:
+
+    .\Start-DenOS.cmd -BootInstalled
+
+This leaves the virtual DVD drive empty for that launch. Double-clicking
+Start-DenOS.cmd again returns to the live ISO. Installed files stay in the VDI;
+the DenOS installation is not encrypted by this first-release installer.
+
+OWNERSHIP AND RECOVERY
+The launcher refuses to alter an unrelated VM with the same name. It checks
+its ownership file, VM UUID and actual configuration location before using an
+existing VM, and checks storage and sharing settings again before starting.
+If the name is already taken, rename the other VM in VirtualBox Manager.
+
+Keep the DenOS-VM folder and launcher files in their original location after
+first use. If you unregister an owned VM, use VirtualBox Manager > Machine >
+Add to select DenOS-VM\DenOS 0.1\DenOS 0.1.vbox, then rerun the launcher.
+If setup stopped before a .vbox file was created, keep any useful files and
+rename the incomplete DenOS-VM folder before retrying. Nothing is deleted
+automatically. Saved sessions are not discarded: shut down the VM completely
+in VirtualBox Manager before changing its configuration with this launcher.
+
+If you manually attach shared folders, extra disks, other storage controllers
+or forwarded ports, the launcher refuses to start the VM until those additions
+are removed. Snapshot storage may also require starting directly from
+VirtualBox Manager. No host VM was created during launcher development.
+
+The .cmd wrapper invokes PowerShell with a process-only execution-policy
+override. It does not change the Windows execution-policy configuration.

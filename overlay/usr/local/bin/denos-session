@@ -1,0 +1,11 @@
+#!/bin/sh
+# Match wallpaper across VM and physical display connector names.
+sleep 2
+xfconf-query -c xfce4-desktop -l | while IFS= read -r property; do
+  case "$property" in
+    */last-image) xfconf-query -c xfce4-desktop -p "$property" -s /usr/share/denos/wallpaper.svg ;;
+    */image-style) xfconf-query -c xfce4-desktop -p "$property" -s 5 ;;
+  esac
+done
+# Mute the capture source at login. Applications may unmute it later.
+pactl set-source-mute @DEFAULT_SOURCE@ 1 >/dev/null 2>&1 || true

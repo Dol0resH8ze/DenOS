@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<channel name="thunar" version="1.0"><property name="misc-single-click" type="bool" value="false"/><property name="misc-volume-management" type="bool" value="false"/><property name="last-view" type="string" value="ThunarIconView"/><property name="last-window-width" type="int" value="960"/><property name="last-window-height" type="int" value="640"/></channel>

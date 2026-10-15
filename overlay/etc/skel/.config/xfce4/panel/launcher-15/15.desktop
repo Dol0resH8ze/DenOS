@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Settings
+Exec=xfce4-settings-manager
+Icon=preferences-desktop
+Terminal=false
+StartupNotify=true

@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Welcome to DenOS
+Exec=denos-hub
+Icon=/usr/share/denos/denos.svg
+Terminal=false
+X-GNOME-Autostart-enabled=true
+OnlyShowIn=XFCE;

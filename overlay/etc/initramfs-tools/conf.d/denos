@@ -1,0 +1,2 @@
+# gzip is included in the minimal image; do not rely on an optional zstd binary.
+COMPRESS=gzip

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Install DenOS
+Comment=Guided whole-disk installation
+Exec=xfce4-terminal --hold --title="Install DenOS" --command="sudo /usr/local/sbin/denos-install"
+Icon=system-software-install
+Terminal=false
+Categories=System;

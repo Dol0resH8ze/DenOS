@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=DenOS session defaults
+Exec=/usr/local/bin/denos-session
+OnlyShowIn=XFCE;

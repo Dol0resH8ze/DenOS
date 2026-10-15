@@ -1,0 +1,2 @@
+# Narrow native Privacy Center operations, also kept after installation.
+%sudo ALL=(root) NOPASSWD: /usr/local/sbin/denos-control status, /usr/local/sbin/denos-control online, /usr/local/sbin/denos-control offline

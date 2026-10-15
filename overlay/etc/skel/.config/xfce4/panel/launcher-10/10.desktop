@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=DenOS
+Exec=denos-hub
+Icon=/usr/share/denos/denos.svg
+Terminal=false
+StartupNotify=true

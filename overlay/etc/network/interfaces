@@ -1,0 +1,4 @@
+# NetworkManager manages external interfaces. Keep the loopback directory and
+# definition available for Debian live-boot's early networking hook.
+auto lo
+iface lo inet loopback

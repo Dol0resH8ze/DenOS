@@ -1,0 +1,13 @@
+[Unit]
+Description=DenOS offline-by-default policy
+After=local-fs.target nftables.service
+Before=NetworkManager.service network-pre.target display-manager.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/denos-control boot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,358 @@
+#!/bin/bash
+# DenOS 0.1 installer. Intended to run ONLY from the DenOS live ISO.
+set -Eeuo pipefail
+export LC_ALL=C
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+umask 077
+
+readonly SOURCE=/run/live/medium/live/filesystem.squashfs
+readonly MIN_DISK_BYTES=$((20 * 1024 * 1024 * 1024))
+DRY_RUN=0
+DISK=''
+USERNAME=''
+TARGET=''
+EFI_PART=''
+ROOT_PART=''
+DISK_FINGERPRINT=''
+INSTALL_FINISHED=0
+UDISKS_WAS_ACTIVE=0
+declare -a MOUNTED_PATHS=()
+
+usage() {
+    cat <<'EOF'
+DenOS 0.1 installer — amd64, BIOS and UEFI
+
+Usage: sudo denos-install [--dry-run] [--disk /dev/DEVICE] [--user USERNAME]
+
+Installs onto one entire disk and ERASES ALL OF ITS CONTENTS.
+The installed root filesystem is NOT ENCRYPTED. Secure Boot is not supported.
+Use a spare machine or a virtual machine. Back up anything you need first.
+
+--dry-run  Validate the live image, account name, and chosen disk; print the plan.
+           Does not partition, format, mount, write files, or change services.
+--disk     Whole-disk path from the displayed lsblk list (never a partition).
+--user     Normal account name; otherwise ask interactively.
+--help     Print this help without requiring a live system or root.
+
+Without --dry-run, the final confirmation requires ERASE followed by the exact
+canonical device path, for example: ERASE /dev/vda
+EOF
+}
+
+die() { printf '\nDenOS installer: %s\n' "$*" >&2; exit 1; }
+notice() { printf '\n%s\n' "$*"; }
+
+cleanup() {
+    local status=$? i cleanup_failed=0
+    trap - EXIT INT TERM HUP
+    if [[ ${#MOUNTED_PATHS[@]} -gt 0 ]]; then
+        sync || true
+        for ((i=${#MOUNTED_PATHS[@]}-1; i>=0; i--)); do
+            if mountpoint -q -- "${MOUNTED_PATHS[i]}"; then
+                umount --recursive -- "${MOUNTED_PATHS[i]}" || cleanup_failed=1
+            fi
+        done
+    fi
+    if [[ -n "$TARGET" ]] && ! mountpoint -q -- "$TARGET"; then
+        rmdir -- "$TARGET" 2>/dev/null || true
+    fi
+    if [[ "$UDISKS_WAS_ACTIVE" == 1 ]]; then
+        systemctl start udisks2.service || true
+    fi
+    if [[ "$cleanup_failed" == 1 ]]; then
+        printf '\nSome target mounts could not be unmounted. Do not unplug the disk; reboot the live system first.\n' >&2
+        status=1
+    fi
+    if [[ "$status" != 0 && -n "$TARGET" && "$INSTALL_FINISHED" != 1 ]]; then
+        printf '\nInstallation did not finish. The selected disk may contain a partial installation.\n' >&2
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+trap 'printf "\nInstallation failed at line %s.\n" "$LINENO" >&2' ERR
+
+while (($#)); do
+    case "$1" in
+        --dry-run) DRY_RUN=1; shift ;;
+        --disk|--user)
+            (($# >= 2)) || die "$1 needs a value."
+            [[ -n "$2" && "$2" != --* ]] || die "$1 needs a value."
+            if [[ "$1" == --disk ]]; then DISK=$2; else USERNAME=$2; fi
+            shift 2
+            ;;
+        --help|-h) usage; exit 0 ;;
+        *) die "Unknown option: $1 (see --help)." ;;
+    esac
+done
+
+[[ "$EUID" == 0 ]] || die 'Run from a terminal with sudo denos-install.'
+[[ -t 0 && -t 1 ]] || die 'Use an interactive terminal; piped installation is disabled.'
+[[ $(uname -m) == x86_64 ]] || die 'This installer supports amd64 / x86_64 only.'
+for tool in lsblk findmnt mountpoint readlink blockdev swapon unsquashfs \
+            parted partprobe udevadm mkfs.vfat mkfs.ext4 blkid mount umount \
+            chroot sha256sum awk sed grep find sync mktemp; do
+    command -v "$tool" >/dev/null || die "Required live-system tool is missing: $tool"
+done
+mountpoint -q /run/live/medium || die 'The DenOS live medium is not mounted at /run/live/medium.'
+[[ -r "$SOURCE" ]] || die "The live filesystem is missing: $SOURCE"
+unsquashfs -s "$SOURCE" >/dev/null || die 'The live filesystem is not a readable SquashFS image.'
+live_passwd=$(unsquashfs -cat "$SOURCE" etc/passwd)
+live_group=$(unsquashfs -cat "$SOURCE" etc/group)
+live_den_uid=$(awk -F: '$1 == "den" {print $3}' <<<"$live_passwd")
+[[ "$live_den_uid" == 1000 ]] || die 'This live image must contain the den account with UID 1000.'
+for boot_tool in /usr/sbin/grub-install /usr/sbin/update-grub /usr/sbin/update-initramfs; do
+    [[ -x "$boot_tool" ]] || die "Required boot tool is missing: $boot_tool"
+done
+[[ -d /usr/lib/grub/i386-pc && -d /usr/lib/grub/x86_64-efi ]] || die 'Both BIOS and UEFI GRUB modules are required.'
+compgen -G '/boot/vmlinuz-*' >/dev/null || die 'The live image has no installed Linux kernel.'
+
+notice 'DenOS 0.1 — whole-disk installation'
+printf '%s\n' 'This installer erases ONE entire disk.' \
+    'The installed filesystem will be UNENCRYPTED. Secure Boot must be disabled.' \
+    'NetworkManager remains disconnected until you explicitly connect after boot.'
+printf '\nAvailable whole disks:\n'
+lsblk --nodeps --paths --output NAME,SIZE,MODEL,TRAN,RO,TYPE
+if [[ -z "$DISK" ]]; then
+    read -r -p 'Enter the whole-disk device path to use: ' DISK
+fi
+[[ "$DISK" == /dev/* ]] || die 'Enter an absolute /dev/ path shown by lsblk.'
+DISK=$(readlink -f -- "$DISK")
+
+# Return every block ancestor of the filesystem containing a path. The live
+# medium is checked explicitly because the live root itself normally is overlay.
+ancestors_for_path() {
+    local path=$1 source
+    [[ -e "$path" ]] || return 0
+    source=$(findmnt --noheadings --raw --output SOURCE --target "$path") || return 0
+    source=${source%%\[*}
+    [[ -b "$source" ]] || return 0
+    lsblk --inverse --noheadings --raw --paths --output NAME -- "$source"
+}
+
+validate_disk() {
+    local disk_type ro size node path protected active_swap
+    [[ -b "$DISK" ]] || die "$DISK is not a block device."
+    disk_type=$(lsblk --nodeps --noheadings --raw --output TYPE -- "$DISK")
+    [[ "$disk_type" == disk ]] || die 'Select a whole physical or virtual disk, not a partition, loop, or RAID device.'
+    ro=$(blockdev --getro "$DISK")
+    [[ "$ro" == 0 ]] || die "$DISK is read-only."
+    size=$(blockdev --getsize64 "$DISK")
+    [[ "$size" =~ ^[0-9]+$ && "$size" -ge "$MIN_DISK_BYTES" ]] || die 'The selected disk must be at least 20 GiB.'
+
+    for path in / /boot /boot/efi /run/live/medium "$SOURCE"; do
+        while IFS= read -r protected; do
+            [[ "$protected" != "$DISK" ]] || die "$DISK contains the running system, its boot files, or the live medium."
+        done < <(ancestors_for_path "$path")
+    done
+    while IFS= read -r node; do
+        if [[ -n $(lsblk --nodeps --noheadings --raw --output MOUNTPOINTS -- "$node") ]]; then
+            die "$node is mounted or active as swap. Unmount it before selecting this disk."
+        fi
+        # Also reject device-mapper / LVM / RAID holders, even if not mounted.
+        if [[ "$node" != "$DISK" && $(lsblk --nodeps --noheadings --raw --output TYPE -- "$node") != part ]]; then
+            die "$DISK has an active mapped device ($node). Deactivate it before installation."
+        fi
+        while IFS= read -r active_swap; do
+            [[ -z "$active_swap" || $(readlink -f -- "$active_swap") != "$node" ]] || die "$node is active swap."
+        done < <(swapon --noheadings --raw --show=NAME)
+    done < <(lsblk --noheadings --raw --paths --output NAME -- "$DISK")
+}
+
+fingerprint_disk() {
+    { printf '%s\n' "$DISK"; blockdev --getsize64 "$DISK";
+      lsblk --nodeps --noheadings --raw --output MAJ:MIN,MODEL,SERIAL,WWN -- "$DISK";
+    } | sha256sum | awk '{print $1}'
+}
+
+validate_disk
+DISK_FINGERPRINT=$(fingerprint_disk)
+if [[ -z "$USERNAME" ]]; then
+    read -r -p 'Choose your normal login name [den]: ' USERNAME
+    USERNAME=${USERNAME:-den}
+fi
+[[ "$USERNAME" =~ ^[a-z][a-z0-9_-]{0,30}$ ]] || die 'Use 1–31 lowercase letters, numbers, underscores, or hyphens; start with a letter.'
+[[ "$USERNAME" != root ]] || die 'The login name cannot be root.'
+if [[ "$USERNAME" != den ]] && awk -F: -v name="$USERNAME" '$1 == name {found=1} END {exit !found}' <<<"$live_passwd"; then
+    die "The account name $USERNAME is reserved by the live image. Choose another."
+fi
+if [[ "$USERNAME" != den ]] && awk -F: -v name="$USERNAME" '$1 == name {found=1} END {exit !found}' <<<"$live_group"; then
+    die "The group name $USERNAME is reserved by the live image. Choose another."
+fi
+
+notice 'Selected disk — verify these details carefully:'
+lsblk --nodeps --paths --output NAME,SIZE,MODEL,SERIAL,TRAN -- "$DISK"
+printf '\nPlan:\n  Disk: %s\n  Account: %s (normal user, sudo enabled)\n' "$DISK" "$USERNAME"
+printf '%s\n' \
+    '  Replace the existing partition table and filesystems on this disk.' \
+    '  This is not a secure overwrite of old data.' \
+    '  GPT: 2 MiB BIOS boot + 512 MiB FAT32 EFI + remaining space ext4 root.' \
+    '  Copy the live filesystem and preserve the DenOS dark desktop defaults.' \
+    '  Set a new login password interactively; lock the root account.' \
+    '  Remove live auto-login and general passwordless sudo.' \
+    '  Keep only the three fixed Privacy Center controls passwordless.' \
+    '  Install GRUB for legacy BIOS and the UEFI fallback boot path.' \
+    '  No disk encryption. No swap partition. No automatic network connection.'
+if [[ "$DRY_RUN" == 1 ]]; then
+    notice 'Dry run complete. No system changes were made.'
+    exit 0
+fi
+printf '\nTo ERASE the selected disk, type exactly: ERASE %s\n' "$DISK"
+read -r -p '> ' confirmation
+[[ "$confirmation" == "ERASE $DISK" ]] || die 'Confirmation did not match; nothing was changed.'
+
+# Recheck immediately before the first mutation, including disk identity.
+validate_disk
+[[ $(fingerprint_disk) == "$DISK_FINGERPRINT" ]] || die 'The selected device changed after selection. Start again.'
+if command -v systemctl >/dev/null && systemctl is-active --quiet udisks2.service; then
+    UDISKS_WAS_ACTIVE=1
+    systemctl stop udisks2.service
+fi
+validate_disk
+TARGET=$(mktemp -d /mnt/denos-install.XXXXXXXX)
+notice "Erasing and partitioning $DISK ..."
+parted --script --align optimal -- "$DISK" \
+    mklabel gpt \
+    mkpart DENOS-BIOS 1MiB 3MiB set 1 bios_grub on \
+    mkpart DENOS-EFI fat32 3MiB 515MiB set 2 esp on \
+    mkpart DENOS-ROOT ext4 515MiB 100%
+partprobe -- "$DISK"
+udevadm settle --timeout=30
+EFI_PART=$(lsblk --noheadings --raw --paths --output NAME,PARTN -- "$DISK" | awk '$2 == 2 {print $1}')
+ROOT_PART=$(lsblk --noheadings --raw --paths --output NAME,PARTN -- "$DISK" | awk '$2 == 3 {print $1}')
+[[ -b "$EFI_PART" && -b "$ROOT_PART" ]] || die 'The new partitions did not appear.'
+mkfs.vfat -F 32 -n DENOS_EFI -- "$EFI_PART"
+mkfs.ext4 -F -L DENOS_ROOT -- "$ROOT_PART"
+mount -- "$ROOT_PART" "$TARGET"
+MOUNTED_PATHS+=("$TARGET")
+notice 'Copying the DenOS filesystem. This may take several minutes ...'
+unsquashfs -no-progress -f -d "$TARGET" "$SOURCE"
+
+printf '%s\n' denos > "$TARGET/etc/hostname"
+cat > "$TARGET/etc/hosts" <<'EOF'
+127.0.0.1 localhost
+127.0.1.1 denos
+::1 localhost ip6-localhost ip6-loopback
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+EOF
+ROOT_UUID=$(blkid -s UUID -o value -- "$ROOT_PART")
+EFI_UUID=$(blkid -s UUID -o value -- "$EFI_PART")
+[[ -n "$ROOT_UUID" && -n "$EFI_UUID" ]] || die 'Unable to read new filesystem UUIDs.'
+cat > "$TARGET/etc/fstab" <<EOF
+# DenOS installed system. No swap is configured.
+UUID=$ROOT_UUID / ext4 defaults,errors=remount-ro 0 1
+UUID=$EFI_UUID /boot/efi vfat umask=0077 0 2
+EOF
+cat > "$TARGET/etc/motd" <<'EOF'
+DenOS 0.1
+
+Networking starts disabled. Open Privacy Center to connect when you choose.
+Review your privacy settings before sharing personal information online.
+EOF
+chmod 644 "$TARGET/etc/hostname" "$TARGET/etc/hosts" "$TARGET/etc/fstab" "$TARGET/etc/motd"
+
+# Account mutations precede /proc binding so usermod sees no running live user.
+if [[ "$USERNAME" != den ]]; then
+    chroot "$TARGET" usermod --login "$USERNAME" --home "/home/$USERNAME" --move-home den
+    if chroot "$TARGET" getent group den >/dev/null; then
+        chroot "$TARGET" groupmod --new-name "$USERNAME" den
+    fi
+fi
+chroot "$TARGET" usermod --append --groups sudo "$USERNAME"
+chroot "$TARGET" usermod --shell /bin/bash "$USERNAME"
+chroot "$TARGET" usermod --comment "$USERNAME" "$USERNAME"
+chroot "$TARGET" passwd --lock root
+# Lock the copied live password before any interactive password prompt.
+chroot "$TARGET" passwd --lock "$USERNAME"
+chroot "$TARGET" chage --lastday -1 "$USERNAME"
+
+# DenOS live-only entry points and privileges. The installed sudo group retains
+# Debian's standard password-required sudo policy.
+rm -f -- "$TARGET/etc/sudoers.d/denos-live" \
+    "$TARGET/etc/lightdm/lightdm.conf.d/50-denos-live.conf" \
+    "$TARGET/etc/xdg/autostart/denos-installer.desktop" \
+    "$TARGET/usr/share/applications/denos-installer.desktop" \
+    "$TARGET/usr/share/applications/denos-install.desktop" \
+    "$TARGET/home/$USERNAME/Desktop/denos-installer.desktop" \
+    "$TARGET/home/$USERNAME/Desktop/denos-install.desktop" \
+    "$TARGET/home/$USERNAME/.config/autostart/denos-installer.desktop"
+if [[ -d "$TARGET/etc/lightdm" ]]; then
+    while IFS= read -r -d '' conf; do
+        sed -i -E '/^[[:space:]]*autologin-(user|user-timeout|session)[[:space:]]*=/d' "$conf"
+    done < <(find "$TARGET/etc/lightdm" -type f -name '*.conf' -print0)
+fi
+# The Privacy Center deliberately permits only three fixed, argument-free
+# commands. Verify the exact packaged rule; reject any other passwordless rule.
+expected_control_rule='%sudo ALL=(root) NOPASSWD: /usr/local/sbin/denos-control status, /usr/local/sbin/denos-control online, /usr/local/sbin/denos-control offline'
+if [[ -f "$TARGET/etc/sudoers.d/denos-control" ]]; then
+    actual_control_rule=$(sed -E '/^[[:space:]]*(#|$)/d' "$TARGET/etc/sudoers.d/denos-control")
+    [[ "$actual_control_rule" == "$expected_control_rule" ]] || die 'The Privacy Center sudo rule differs from the reviewed allow-list.'
+fi
+if grep -R --exclude=denos-control -E '^[[:space:]]*[^#[:space:]].*NOPASSWD' "$TARGET/etc/sudoers" "$TARGET/etc/sudoers.d"; then
+    die 'Unexpected passwordless sudo rule remains. Review the copied sudoers configuration before continuing.'
+fi
+
+mkdir -p -- "$TARGET/boot/efi" "$TARGET/dev" "$TARGET/proc" "$TARGET/sys" "$TARGET/run"
+mount -- "$EFI_PART" "$TARGET/boot/efi"
+MOUNTED_PATHS+=("$TARGET/boot/efi")
+for system_path in dev proc sys; do
+    mount --rbind "/$system_path" "$TARGET/$system_path"
+    MOUNTED_PATHS+=("$TARGET/$system_path")
+    mount --make-rslave "$TARGET/$system_path"
+done
+# Isolated /run prevents target tools from talking to the live system's services.
+mount -t tmpfs -o mode=755,nosuid,nodev tmpfs "$TARGET/run"
+MOUNTED_PATHS+=("$TARGET/run")
+
+notice "Set the password for $USERNAME. Password characters will not be displayed."
+until chroot "$TARGET" passwd "$USERNAME"; do
+    notice 'Password setup did not complete. Try again, or press Ctrl+C to abort.'
+done
+chroot "$TARGET" chage --lastday "$(date +%Y-%m-%d)" "$USERNAME"
+chroot "$TARGET" visudo --check
+
+# Remove identities and saved connection secrets copied from the build image.
+rm -f -- "$TARGET/etc/machine-id" "$TARGET/var/lib/dbus/machine-id" \
+    "$TARGET/var/lib/systemd/random-seed"
+: > "$TARGET/etc/machine-id"
+chmod 644 "$TARGET/etc/machine-id"
+mkdir -p -- "$TARGET/var/lib/dbus"
+ln -s /etc/machine-id "$TARGET/var/lib/dbus/machine-id"
+if [[ -d "$TARGET/etc/NetworkManager/system-connections" ]]; then
+    find "$TARGET/etc/NetworkManager/system-connections" -mindepth 1 -maxdepth 1 -type f -delete
+fi
+if [[ -d "$TARGET/etc/ssh" ]]; then
+    find "$TARGET/etc/ssh" -maxdepth 1 -type f -name 'ssh_host_*' -delete
+fi
+mkdir -p -- "$TARGET/var/lib/NetworkManager"
+cat > "$TARGET/var/lib/NetworkManager/NetworkManager.state" <<'EOF'
+[main]
+NetworkingEnabled=false
+WirelessEnabled=false
+WWANEnabled=false
+EOF
+
+# Do not discover or add other disks' operating systems to this installation.
+mkdir -p -- "$TARGET/etc/default/grub.d"
+cat > "$TARGET/etc/default/grub.d/90-denos-installed.cfg" <<'EOF'
+GRUB_DISTRIBUTOR="DenOS"
+GRUB_DISABLE_OS_PROBER=true
+GRUB_CMDLINE_LINUX_DEFAULT="quiet"
+GRUB_CMDLINE_LINUX=""
+EOF
+notice 'Building the installed initramfs and bootloader ...'
+chroot "$TARGET" update-initramfs -u -k all
+chroot "$TARGET" grub-install --target=i386-pc --recheck "$DISK"
+chroot "$TARGET" grub-install --target=x86_64-efi --efi-directory=/boot/efi \
+    --bootloader-id=DenOS --removable --no-nvram --recheck
+chroot "$TARGET" update-grub
+[[ -s "$TARGET/boot/efi/EFI/BOOT/BOOTX64.EFI" ]] || die 'The UEFI fallback bootloader was not created.'
+[[ -s "$TARGET/boot/grub/grub.cfg" ]] || die 'The GRUB boot configuration was not created.'
+grep -q "$ROOT_UUID" "$TARGET/boot/grub/grub.cfg" || die 'The GRUB configuration does not reference the installed root filesystem.'
+sync
+INSTALL_FINISHED=1
+notice "DenOS installation is complete on $DISK. Shut down, remove the live ISO/USB, and boot the installed disk."
+printf '%s\n' 'The disk is unencrypted. Use your new account password to sign in; network access starts disabled.'

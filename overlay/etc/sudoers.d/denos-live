@@ -1,0 +1,2 @@
+# Live session only. Removed by denos-install.
+den ALL=(ALL:ALL) NOPASSWD: ALL

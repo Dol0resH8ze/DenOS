@@ -1,0 +1,44 @@
+DenOS 0.1 — Verification record
+Date: 2026-10-15
+
+Release: DenOS-0.1-amd64.iso
+Architecture: amd64 / x86_64
+Base: Debian 13 trixie; Linux 6.12.111+deb13-amd64; Xfce 4.20
+SHA256: 7c416f564b311bbc9246e6812c608c9edef30c134a7afcedcd864ca9a2a935d9
+
+Completed checks
+- Debian package signatures verified by debootstrap/APT; 671 installed packages.
+- dpkg --audit clean; Python compilation, Bash syntax, and sudoers validation.
+- Installer ShellCheck static analysis passed.
+- BIOS and UEFI ISO boot reached the real Xfce desktop in QEMU TCG.
+- Native GTK app navigation exercised across all five pages.
+- Native dark theme, custom SVG wallpaper/icons rendered in the guest.
+- Startup NetworkManager state disabled; nftables output policy drop.
+- Enabling networking yielded DHCP and HTTPS 200 from deb.debian.org.
+- Returning offline disabled networking and restored output policy drop.
+- Firefox privacy policy files validated: telemetry/studies disabled, strict
+  tracking protection, private-browsing default.
+- Installer dry-run completed with no disk changes.
+- Real installations completed successfully on two separate disposable 24 GiB
+  qcow2 disks, including both BIOS and EFI GRUB installation.
+- Each installed disk booted without an ISO: BIOS and UEFI paths both tested.
+- Password login succeeded on installed BIOS and UEFI systems.
+- Detailed installed UEFI checks passed: ext4 root, EFI partition, new user,
+  locked root, removed live auto-login, no general passwordless sudo, allowed
+  fixed Privacy Center commands, offline firewall, fresh machine identity,
+  updated motd, Arc-Dark theme, zero failed services.
+- Source ZIP integrity verified and release ISO copy SHA256 matched.
+
+The tested installation candidate was finalized with three small corrections:
+the installed account display name, an explicit gzip initramfs setting, and
+the loopback interfaces file expected by live-boot. The release source and ISO
+contain those corrections. The exact release ISO received a final BIOS smoke
+boot; see the supplied desktop screenshot.
+
+Limits
+- Physical computers, USB writing and hardware-specific drivers were not tested.
+- The optional Windows VirtualBox launcher received syntax and CLI flag checks;
+  it was not executed and no host VirtualBox VM was registered during development.
+- Secure Boot is unsupported. Debian main-only drivers/firmware are included.
+- The installed filesystem is unencrypted. The installer erases its chosen disk.
+- This is an experimental remix, not an independently audited anonymity system.

@@ -1,0 +1,60 @@
+#!/usr/bin/python3
+"""Small privileged network controller; accepts no arbitrary commands or paths."""
+import json
+import os
+import subprocess
+import sys
+
+def run(args, **kw):
+    return subprocess.run(args, text=True, capture_output=True, timeout=20, **kw)
+
+def nft_mode(online):
+    policy = 'accept' if online else 'drop'
+    rules = 'flush chain inet denos output\n'
+    rules += 'add chain inet denos output { type filter hook output priority 0; policy ' + policy + '; }\n'
+    rules += 'add rule inet denos output oifname "lo" accept\n'
+    p = run(['/usr/sbin/nft', '-f', '-'], input=rules)
+    if p.returncode:
+        raise RuntimeError(p.stderr.strip())
+
+def main():
+    if os.geteuid() != 0:
+        raise RuntimeError('This command needs administrator privileges.')
+    if len(sys.argv) != 2 or sys.argv[1] not in ('status','online','offline','boot'):
+        raise RuntimeError('Usage: denos-control status|online|offline|boot')
+    action = sys.argv[1]
+    if action == 'status':
+        n = run(['/usr/bin/nmcli','networking'])
+        f = run(['/usr/sbin/nft','list','table','inet','denos'])
+        o = run(['/usr/sbin/nft','list','chain','inet','denos','output'])
+        i = run(['/usr/sbin/nft','list','chain','inet','denos','input'])
+        active = f.returncode == 0 and 'policy drop' in i.stdout
+        network = 'unavailable' if n.returncode or o.returncode else ('enabled' if n.stdout.strip() == 'enabled' and 'policy accept' in o.stdout else 'disabled')
+        print(json.dumps({'network':network,'firewall':active}))
+    elif action == 'boot':
+        # Starts before NetworkManager: every boot begins offline.
+        os.makedirs('/var/lib/NetworkManager', exist_ok=True)
+        with open('/var/lib/NetworkManager/NetworkManager.state','w') as fp:
+            fp.write('[main]\nNetworkingEnabled=false\nWirelessEnabled=false\nWWANEnabled=false\n')
+        p = run(['/usr/sbin/nft','-f','/etc/nftables.conf'])
+        if p.returncode:
+            raise RuntimeError(p.stderr.strip())
+    elif action == 'offline':
+        nft_mode(False)
+        p = run(['/usr/bin/nmcli','networking','off'])
+        if p.returncode:
+            raise RuntimeError('Traffic is blocked, but NetworkManager reported: '+p.stderr.strip())
+    elif action == 'online':
+        nft_mode(True)
+        p = run(['/usr/bin/nmcli','networking','on'])
+        if p.returncode:
+            nft_mode(False)
+            raise RuntimeError(p.stderr.strip())
+        run(['/usr/bin/nmcli','radio','wifi','on'])
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
